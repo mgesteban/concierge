@@ -34,7 +34,14 @@ demo video voiceover. Generated (mostly) by the `/status` skill at end of day.
 
 **Open questions / risks**
 - The `NEVER`/`ALWAYS` language in the original Governance Expert system prompt contradicts Tark's §8.6 guidance for 4.7. Need to rewrite conditionally before Thursday's live tests — otherwise the agent will over-refuse benign explanatory questions.
-- Need to reach out to 2–3 BoardBreeze subscribers today or tomorrow for Friday/Saturday user-test calls (playbook §16.3). Calendars fill up; don't defer this to Friday morning.
-- Twilio account: confirm whether Grace has a dev subaccount or needs to spin one up before Thursday's voice wiring. Fresh credentials so `.env.example` can ship cleanly.
+
+**Evening addendum (post-push)**
+- Pushed `51eb246` to `origin/main` after rebasing on top of GitHub's stub README commit. Repo is public, MIT licensed: https://github.com/mgesteban/concierge
+- Resolved the three end-of-day unknowns:
+  - ✅ Subscriber outreach — Grace has 3 BoardBreeze subscribers she can line up personally tomorrow; no cold email needed.
+  - ✅ Twilio — account SID, auth token, and phone number already in hand.
+  - ✅ Anthropic credits — $500 received.
+- `.env` populated locally with Anthropic API key, Twilio (SID + auth + phone), ElevenLabs (API key + voice ID), and Grace's personal phone number for escalations. Supabase, Voyage, and Deepgram keys deferred until Thursday when those subsystems come online.
+- Ready state for Thursday: `uvicorn app.main:app --reload` should boot tomorrow with zero additional setup.
 
 ---
