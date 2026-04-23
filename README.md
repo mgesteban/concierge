@@ -182,7 +182,9 @@ uvicorn app.main:app --reload --port 8000
 
 ## Built by
 
-Grace Esteban — solo founder of BoardBreeze. Domain expert in California public-agency governance (Brown Act, Bagley-Keene, community college districts, special districts).
+**Grace Esteban** — solo founder of BoardBreeze. Domain expert in California public-agency governance (Brown Act, Bagley-Keene, community college districts, special districts).
+
+Paired with **Claude Code (Opus 4.7)** as development partner throughout the hackathon. See the "How we used Opus 4.7" and "How we used Claude Managed Agents" sections above for how the collaboration actually worked — and see the `Co-Authored-By` trailers on commits in `git log` for per-commit attribution.
 
 ## License
 
