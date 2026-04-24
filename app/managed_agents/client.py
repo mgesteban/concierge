@@ -31,7 +31,7 @@ import anthropic
 from supabase import create_client, Client as SupabaseClient
 
 from app.managed_agents import agent_spec
-from app.managed_agents.custom_tools import dispatch_custom_tool
+from app.managed_agents.custom_tools import CALLER_CONTEXT, dispatch_custom_tool
 
 log = logging.getLogger(__name__)
 
@@ -152,6 +152,16 @@ def handle_message(phone: str, user_text: str, channel: str = "sms") -> str:
     session_id = get_or_create_session(phone, channel)
     c = _anthropic()
 
+    # Expose the caller phone + channel to custom tools (e.g. escalate_to_grace)
+    # via a context var, so dispatch doesn't need extra plumbing.
+    token = CALLER_CONTEXT.set({"phone": phone, "channel": channel})
+    try:
+        return _run_turn(session_id, user_text, c)
+    finally:
+        CALLER_CONTEXT.reset(token)
+
+
+def _run_turn(session_id: str, user_text: str, c: anthropic.Anthropic) -> str:
     # Emit the user's message.
     c.beta.sessions.events.send(
         session_id=session_id,
