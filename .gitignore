@@ -31,6 +31,10 @@ Thumbs.db
 governance_tools_extracted/
 governance_tools.zip
 *.pdf
+# The playbook is personal strategy notes, not shipped artifact.
+boardbreeze-concierge-playbook-*.md
+# IDE workspace files are per-machine.
+*.code-workspace
 
 # Logs & local data
 logs/

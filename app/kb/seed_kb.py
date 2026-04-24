@@ -6,7 +6,7 @@ Run:
 
 What it does:
   - Loads a hand-authored set of authoritative chunks with exact citations.
-  - Embeds each chunk with Voyage (voyage-3-lite, 1024-dim).
+  - Embeds each chunk with Voyage (voyage-3-lite, 512-dim).
   - Bulk-inserts into Supabase.
 
 Extend freely:

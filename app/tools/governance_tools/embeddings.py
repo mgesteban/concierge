@@ -3,8 +3,12 @@ Embeddings provider. Default: Voyage AI (Anthropic's recommended partner).
 
 Why Voyage:
   - voyage-3-lite is $0.02 / 1M tokens (cheaper than OpenAI text-embedding-3-small)
-  - 1024 dimensions — good quality/size trade-off
+  - 512 dimensions — smaller index, faster search, quality plenty for our KB size
   - Python SDK is minimal
+
+  If retrieval quality looks weak at demo time, swap EMBEDDING_MODEL to
+  "voyage-3" (1024-dim) and update schema.sql's vector() width to match,
+  then re-seed.
 
 To swap to OpenAI, replace embed_text with:
     from openai import OpenAI
@@ -21,7 +25,7 @@ from functools import lru_cache
 import voyageai
 
 EMBEDDING_MODEL = "voyage-3-lite"
-EMBEDDING_DIM = 1024
+EMBEDDING_DIM = 512
 
 
 @lru_cache(maxsize=1)

@@ -2,7 +2,7 @@
 -- Run this in your Supabase SQL editor.
 --
 -- Creates:
---   1. governance_kb       — RAG corpus with 1024-dim Voyage embeddings
+--   1. governance_kb       — RAG corpus with 512-dim Voyage embeddings
 --   2. conversation_state  — per-session state the Concierge reads
 --   3. handoffs            — log of agent-to-agent handoffs (for dashboard)
 --   4. match_governance_kb RPC — pgvector similarity search with filters
@@ -25,7 +25,7 @@ create table if not exists governance_kb (
     jurisdiction   text not null,         -- "CA" | "CA_STATE" | "federal" | ...
     agency_types   text[] default '{}',   -- ['school_district', 'ccd'] or []=all
     metadata       jsonb default '{}'::jsonb,
-    embedding      vector(1024),          -- voyage-3-lite → 1024 dims
+    embedding      vector(512),           -- voyage-3-lite → 512 dims
     created_at     timestamptz not null default now()
 );
 
@@ -77,7 +77,7 @@ create index if not exists handoffs_session_idx on handoffs (session_id);
 -- jurisdiction_filter is nullable — pass NULL to search across all.
 -- ==========================================================================
 create or replace function match_governance_kb(
-    query_embedding      vector(1024),
+    query_embedding      vector(512),
     match_count          int default 5,
     jurisdiction_filter  text default null,
     similarity_threshold float default 0.3

@@ -1,35 +1,35 @@
-"""
-Twilio Voice webhooks.
+"""Twilio Voice webhooks — day-one pipeline.
 
-Two-stage strategy (per playbook §7.1 — "Shipping > perfect"):
+Flow: Twilio <Gather input=speech> → FastAPI → CMA session → TwiML <Say>.
+Latency is ~3–5 s/turn; good enough to demo the end-to-end loop.
 
-  Stage 1 (today): <Gather> + <Say>. Twilio transcribes one turn, posts it
-    back to us, we return TwiML with the reply spoken via Polly/ElevenLabs.
-    Latency is ~3–5s/turn — not magical but works end-to-end on day one.
-
-  Stage 2 (Thu/Fri): swap to Twilio Media Streams + Deepgram (STT) +
-    ElevenLabs (TTS) for real-time streaming. Target <1s perceived latency.
-
-Both stages share the same Concierge supervisor — only the transport changes.
+Friday upgrade (per playbook §7.1): Twilio Media Streams + Deepgram STT
++ ElevenLabs TTS for sub-second perceived latency. Same CMA session
+layer underneath — only the transport changes.
 """
 from fastapi import APIRouter, Form, Response
+from fastapi.concurrency import run_in_threadpool
 
-from app.agents.concierge import run_concierge_turn
+from app.managed_agents.client import handle_message
 
 router = APIRouter()
 
 
+GREETING = (
+    "Hi, this is BoardBreeze's AI concierge. I can help with governance "
+    "questions, product support, or connect you with Grace. What's going on?"
+)
+
+
 @router.post("/inbound")
-async def inbound_call(From: str = Form(...), CallSid: str = Form(...)) -> Response:
-    """First touch: greet, then hand to /gather for the first turn."""
-    greeting = (
-        "Hi, this is BoardBreeze's AI concierge. I can help with governance "
-        "questions, product support, or connect you with Grace. What's going on?"
-    )
+async def inbound_call(
+    From: str = Form(...), CallSid: str = Form(...)
+) -> Response:
+    """First touch: greet, then gather the caller's first utterance."""
     twiml = (
         '<?xml version="1.0" encoding="UTF-8"?>'
         "<Response>"
-        f'<Say voice="Polly.Joanna">{greeting}</Say>'
+        f'<Say voice="Polly.Joanna">{GREETING}</Say>'
         '<Gather input="speech" action="/twilio/voice/gather" '
         'speechTimeout="auto" language="en-US"/>'
         "</Response>"
@@ -43,9 +43,8 @@ async def gather(
     CallSid: str = Form(...),
     SpeechResult: str = Form(""),
 ) -> Response:
-    """One caller turn → one agent turn → speak reply, then gather again."""
+    """One caller turn → one CMA turn → speak reply → gather again."""
     if not SpeechResult.strip():
-        # Silence — re-prompt.
         twiml = (
             '<?xml version="1.0" encoding="UTF-8"?>'
             "<Response>"
@@ -57,10 +56,8 @@ async def gather(
         )
         return Response(content=twiml, media_type="application/xml")
 
-    reply_text = await run_concierge_turn(
-        caller_id=From,
-        channel="voice",
-        caller_message=SpeechResult,
+    reply_text = await run_in_threadpool(
+        handle_message, From, SpeechResult, "voice"
     )
 
     twiml = (
