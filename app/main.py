@@ -2,13 +2,20 @@
 FastAPI entrypoint for BoardBreeze Concierge.
 
 Mounts Twilio webhooks (voice + SMS) and a health check. Twilio posts inbound
-messages/calls to these endpoints; the Concierge supervisor decides which
-specialist handles the turn.
+messages/calls to these endpoints; the Concierge Managed Agent responds.
 
 Run locally:
-    uvicorn app.main:app --reload --port 8000
+    .venv/bin/uvicorn app.main:app --reload --port 8000
 """
+from pathlib import Path
+
+from dotenv import load_dotenv
 from fastapi import FastAPI
+
+# Load .env from repo root so tools, SDKs, and clients find their secrets
+# regardless of how uvicorn was invoked. Safe to call; if a var is already
+# set in the environment, we don't override it.
+load_dotenv(Path(__file__).resolve().parent.parent / ".env")
 
 from app.channels.sms import router as sms_router
 from app.channels.voice import router as voice_router
