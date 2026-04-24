@@ -31,10 +31,18 @@ from app.channels.tts import (
     pop_audio,
     pop_text,
     queue_text,
+    register_audio,
     stream_synth,
     synthesize_static,
 )
-from app.voice_pipeline import forget_call, pop_turn, queue_turn, run_turn
+from app.voice_pipeline import (
+    forget_call,
+    get_turn_result,
+    pop_turn,
+    queue_turn,
+    queue_turn_async,
+    run_turn,
+)
 
 log = logging.getLogger(__name__)
 router = APIRouter()
@@ -45,6 +53,16 @@ GREETING = (
     "questions, product support, or connect you with Grace. What's going on?"
 )
 REPROMPT = "Sorry, I didn't catch that. Could you say it again?"
+# Plays during /gather→/continue while Claude + synth work in the background.
+# Keep this ~3 s spoken so it bridges most of the Claude time; length is
+# deliberate and not filler-for-the-sake-of-it.
+THINKING = "Sure — let me take a quick look at that for you."
+# Spoken if the background turn times out or errors. Ends with a prompt so
+# the <Gather> picks the caller's next utterance cleanly.
+FALLBACK = (
+    "Sorry, I'm having trouble pulling that up right now. "
+    "Could you try asking again?"
+)
 
 _GATHER = (
     '<Gather input="speech" action="/twilio/voice/gather" '
@@ -99,13 +117,76 @@ async def gather(
     CallSid: str = Form(...),
     SpeechResult: str = Form(""),
 ) -> Response:
-    """Queue the turn, return TwiML immediately pointing at /reply."""
+    """Chained-TwiML flow:
+
+    1. Spawn a background turn (Claude + sentence-by-sentence synth →
+       complete MP3 blob).
+    2. Return TwiML that immediately plays a cached "let me look that up"
+       filler, then <Redirect>s to /continue/{turn_id}. Twilio fetches
+       the filler from our static cache in ~100 ms and starts playing.
+    3. While the filler plays (~3 s), the background turn is running.
+    4. /continue waits on the Future, returns <Play>{reply}</Play><Gather/>.
+
+    Net result: caller hears the filler ~300 ms after finishing speaking,
+    then the real answer as soon as it's ready.
+    """
     if not SpeechResult.strip():
         twiml = await _speak_static("reprompt", REPROMPT)
         return Response(content=twiml, media_type="application/xml")
 
-    cid = queue_turn(CallSid, From, SpeechResult)
-    twiml = _play_twiml(f"/twilio/voice/reply/{cid}.mp3")
+    # Kick off the background turn FIRST so it runs while Twilio is
+    # fetching and playing the filler.
+    turn_id = queue_turn_async(CallSid, From, SpeechResult)
+
+    try:
+        filler_cid = await run_in_threadpool(
+            synthesize_static, "thinking", THINKING
+        )
+    except Exception:
+        # Static synth failed — skip the filler and go straight to /continue.
+        # Caller hears silence until /continue lands, but at least the call
+        # doesn't error. ElevenLabs is almost always available.
+        log.exception("filler synth failed — no pre-reply audio")
+        twiml = (
+            '<?xml version="1.0" encoding="UTF-8"?>'
+            "<Response>"
+            f'<Redirect method="POST">/twilio/voice/continue/{turn_id}</Redirect>'
+            "</Response>"
+        )
+        return Response(content=twiml, media_type="application/xml")
+
+    twiml = (
+        '<?xml version="1.0" encoding="UTF-8"?>'
+        "<Response>"
+        f"<Play>/twilio/voice/audio/{filler_cid}.mp3</Play>"
+        f'<Redirect method="POST">/twilio/voice/continue/{turn_id}</Redirect>'
+        "</Response>"
+    )
+    return Response(content=twiml, media_type="application/xml")
+
+
+@router.post("/continue/{turn_id}")
+async def continue_turn(
+    turn_id: str,
+    From: str = Form(""),
+    CallSid: str = Form(""),
+) -> Response:
+    """Wait for the background turn to finish, return TwiML playing the
+    full reply MP3 + re-opening <Gather> for the next utterance.
+
+    Twilio gives webhook handlers ~15 s before it gives up. We cap the
+    wait at 12 s to leave headroom for the HTTP response itself. If the
+    turn hasn't completed by then, we play a polite fallback and let the
+    caller try again.
+    """
+    audio = await run_in_threadpool(get_turn_result, turn_id, 12.0)
+    if audio is None:
+        log.warning("continue_turn: no audio for %s (timeout or missing)", turn_id)
+        twiml = await _speak_static("fallback", FALLBACK)
+        return Response(content=twiml, media_type="application/xml")
+
+    cid = register_audio(audio)
+    twiml = _play_twiml(f"/twilio/voice/audio/{cid}.mp3")
     return Response(content=twiml, media_type="application/xml")
 
 

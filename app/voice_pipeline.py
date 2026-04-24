@@ -35,6 +35,7 @@ import os
 import re
 import uuid
 from collections.abc import Iterator
+from concurrent.futures import Future, ThreadPoolExecutor
 from functools import lru_cache
 from threading import Lock
 from typing import Any
@@ -132,6 +133,8 @@ def _serialize_blocks(blocks: list) -> list[dict]:
 # ---------------------------------------------------------------------------
 # Pending turns — cid → (call_sid, phone, user_text)
 # ---------------------------------------------------------------------------
+# Legacy streaming path. Kept for curl testing via /reply/{cid}.mp3.
+# Production voice calls use queue_turn_async + get_turn_result below.
 
 _PENDING: dict[str, dict] = {}
 _PENDING_LOCK = Lock()
@@ -151,6 +154,63 @@ def queue_turn(call_sid: str, phone: str, user_text: str) -> str:
 def pop_turn(cid: str) -> dict | None:
     with _PENDING_LOCK:
         return _PENDING.pop(cid, None)
+
+
+# ---------------------------------------------------------------------------
+# Background turn execution — for the chained-TwiML flow
+# ---------------------------------------------------------------------------
+# Twilio's <Play> verb buffers the whole MP3 response before starting
+# playback. That defeats mid-response streaming. The workaround: the
+# /gather endpoint kicks off a background turn here and returns TwiML
+# that plays a static filler AND redirects to /continue/{turn_id}. While
+# the filler plays, this pool synthesizes the real reply into a
+# complete MP3 byte blob. /continue blocks on the Future until the blob
+# is ready (bounded by Twilio's ~15 s webhook timeout), then returns
+# TwiML pointing at a single <Play>/audio/{cid}.mp3</Play>. Twilio fetches
+# the complete MP3 once and plays it through — no buffering guessing.
+
+_BG_POOL = ThreadPoolExecutor(max_workers=6, thread_name_prefix="voice-turn")
+_TURN_FUTURES: dict[str, Future] = {}
+_TURN_LOCK = Lock()
+
+
+def queue_turn_async(call_sid: str, phone: str, user_text: str) -> str:
+    """Spawn a background turn. Returns turn_id for /continue/{turn_id}."""
+    turn_id = uuid.uuid4().hex
+    fut = _BG_POOL.submit(_run_turn_to_bytes, call_sid, phone, user_text)
+    with _TURN_LOCK:
+        _TURN_FUTURES[turn_id] = fut
+    return turn_id
+
+
+def get_turn_result(turn_id: str, timeout: float = 12.0) -> bytes | None:
+    """Wait for the background turn's MP3 blob. Returns None on timeout /
+    error. One-shot: the future is popped on fetch."""
+    with _TURN_LOCK:
+        fut = _TURN_FUTURES.pop(turn_id, None)
+    if fut is None:
+        return None
+    try:
+        return fut.result(timeout=timeout)
+    except Exception:
+        log.exception("background turn %s failed or timed out", turn_id)
+        return None
+
+
+def _run_turn_to_bytes(call_sid: str, phone: str, user_text: str) -> bytes:
+    """Drive one turn and collect every MP3 chunk into a single blob.
+
+    Internally reuses run_turn() so the sentence-level synth pipeline and
+    tool dispatch logic are shared with /reply's streaming path.
+    """
+    buf = bytearray()
+    for chunk in run_turn(call_sid, phone, user_text):
+        if chunk:
+            buf.extend(chunk)
+    log.info(
+        "voice turn complete for %s: %d audio bytes", call_sid, len(buf)
+    )
+    return bytes(buf)
 
 
 # ---------------------------------------------------------------------------

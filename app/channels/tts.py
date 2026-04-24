@@ -134,3 +134,20 @@ def synthesize_static(key: str, text: str) -> str:
 def pop_audio(cid: str) -> bytes | None:
     with _LOCK:
         return _CACHE.pop(cid, None)
+
+
+def register_audio(audio: bytes) -> str:
+    """Register pre-computed MP3 bytes for one-shot fetch via /audio/{cid}.mp3.
+
+    Used by the chained-TwiML voice flow: the background turn synthesizes
+    the full reply into a single MP3 blob, hands the bytes to this
+    function, and embeds the returned cid in the <Play> URL it sends to
+    Twilio. Twilio fetches once, plays the whole MP3 straight through —
+    no mid-stream buffering ambiguity.
+    """
+    cid = uuid.uuid4().hex
+    with _LOCK:
+        _prune(_CACHE)
+        _CACHE[cid] = audio
+    log.info("tts registered bytes %s (%d bytes)", cid, len(audio))
+    return cid
