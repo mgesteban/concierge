@@ -165,4 +165,77 @@ in one pass. Details in `notes/cohen-managed-agents.md`.
   `<Say>` blocks with intermediate `<Gather>` for barge-in. Revisit
   after first live call.
 
+**Evening addendum — voice latency fight + real safety tools**
+
+What landed after the morning entry:
+
+- **ElevenLabs replaces Polly + ~30-word reply cap** (`7e24e59`).
+  `<Say>` swapped for `<Play>` against `eleven_flash_v2_5`. Greeting
+  + reprompt static-cached so first touch skips a synth round-trip.
+  System prompt tightened to two sentences / ~30 words and told to
+  skip tool calls on general-knowledge questions so replies fit
+  Twilio's webhook ceiling. `main.py` now auto-loads `.env` from repo
+  root.
+- **Real `verify_citation` + real `escalate_to_grace` + Polly
+  fallback** (`3bb5edf`). Verify: extract section number → KB lookup
+  → Haiku 4.5 claim-support classifier. Ten-case golden Q&A passes
+  10/10 (true positives on 72-hour posting, 24-hour special notice,
+  10-day Bagley-Keene, 2/3 vote to close debate, open-meetings;
+  guards against wrong-hours / wrong-threshold / unknown-section
+  false positives). Haiku keeps the round trip under ~300 ms so
+  voice stays under budget. Escalate: Twilio SMS to Grace with
+  caller phone (via `ContextVar`), channel, reason, urgency,
+  summary; missing Twilio config or send failures degrade to
+  `status=logged_only` so the caller still hears "Grace will reach
+  out". Voice channel wraps ElevenLabs in a Polly fallback path so
+  outages or quota errors degrade voice quality rather than 500 the
+  app.
+- **Direct Messages API for voice + sentence streaming** (`5069f0f`).
+  Measured CMA at ~6 s overhead on top of the underlying model on
+  identical Opus 4.7 prompts (TTFT 0.98 s vs first event at 7.66 s).
+  Voice now drives a direct-Messages turn loop in
+  `app/voice_pipeline.py` — streams tokens, splits on sentence + em-
+  dash boundaries, fires ElevenLabs synth per clause, handles tool
+  use inline against the same `custom_tools` handlers CMA uses. SMS
+  stays on CMA. (CLAUDE.md updated to reflect the voice exception.)
+- **Chained TwiML to defeat Twilio's `<Play>` buffer** (`bab60ee`).
+  Live test caught Twilio buffering the streamed MP3 — caller heard
+  6 s of silence even though our server was emitting bytes at 2.5 s.
+  Fix: `/gather` plays a pre-synthesized filler and `<Redirect>`s to
+  `/continue/{turn_id}`; the Claude turn runs in a background thread
+  pool; `/continue` blocks up to 12 s on the Future and returns the
+  reply MP3 + a fresh `<Gather>`. Twilio sees two short complete
+  MP3s and plays each immediately. Filler starts within ~500 ms.
+  Removed the "say 'Let me check.' before tool calls" prompt rule —
+  combined with the static filler it played back-to-back redundant
+  fillers and burned ~2 s of Opus generation.
+
+**End-of-day net result**
+
+- Perceived voice latency: ~7 s → ~2.5 s for governance questions.
+- Anti-hallucination guardrail (CLAUDE.md rule #2) is real, not a
+  stub — section claims get verified against the KB before the agent
+  speaks them.
+- Escalation path is real — Grace gets a Twilio SMS with the
+  caller's number when the Concierge hands off.
+- Voice degrades gracefully across two failure modes: Polly fallback
+  when ElevenLabs fails, `status=logged_only` when Twilio SMS fails.
+
+**Adjusted Friday top 3**
+
+Original Friday list had real `verify_citation` + real
+`escalate_to_grace` + Deepgram/ElevenLabs streaming. First two are
+done. Revised list:
+
+1. Seed the governance KB from the Brown Act + Bagley-Keene PDFs
+   (still pending — golden Q&A above ran against hand-curated chunks).
+2. First real-subscriber user test on the chained-TwiML voice path.
+   Watch for: filler-to-reply gap on long answers, barge-in behavior,
+   `/continue` 12 s ceiling under tool-use load.
+3. Decide whether the SMS path also moves to direct Messages API. The
+   ~6 s CMA overhead matters less for SMS, but if cross-session
+   continuity can be reproduced on top of Supabase + direct Messages
+   with acceptable code, consolidating to one turn-loop simplifies
+   the demo narrative.
+
 ---

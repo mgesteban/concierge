@@ -18,6 +18,16 @@ rather than separate sub-agents — first-class multi-agent is shipping
 soon, at which point we can split the modes out with minimal code
 change. See `notes/cohen-managed-agents.md` for the direct quotes.
 
+**Voice exception:** the voice channel runs its turn loop against the
+direct Messages API (`app/voice_pipeline.py`), not CMA. Measured
+~6 s of CMA event-stream overhead on identical Opus 4.7 prompts —
+unworkable inside Twilio's ~15 s webhook ceiling. The voice path
+re-implements tool dispatch (`search_governance_kb`,
+`verify_citation`, `escalate_to_grace`) inline against the same
+backend handlers. SMS still goes through CMA, so caller↔CMA-session
+continuity for the "Jane texts Monday, again Thursday" flow is
+preserved on the SMS side.
+
 Sources of truth:
 - `boardbreeze-concierge-playbook-updated-04-22-2026.md` — strategy,
   day-by-day plan, demo-video shot list, Tark's power moves. Untracked,
@@ -79,17 +89,24 @@ yet." Triage by hand.
 
 ```
 app/
-├── main.py               FastAPI entrypoint
+├── main.py               FastAPI entrypoint (auto-loads .env, wires loggers)
 ├── config.py             pydantic-settings env loader
-├── managed_agents/       CMA integration — the production Concierge
+├── voice_pipeline.py     direct Messages API turn loop for voice — sentence
+│                         streaming, inline tool dispatch, ThreadPool-backed
+│                         queue_turn_async/get_turn_result for chained TwiML
+├── managed_agents/       CMA integration — used by SMS
 │   ├── agent_spec.py       system prompt, custom tool defs, agent kwargs
 │   ├── client.py           ensure_agent/environment/session + handle_message
 │   └── custom_tools.py     backend dispatch for search_kb, verify_citation,
-│                           escalate_to_grace
+│                           escalate_to_grace (shared with voice_pipeline)
 ├── agents/               historical only (v0 reference loop, kept for the
 │                         README's v0→v1 narrative — nothing imports it)
 ├── tools/governance_tools/ RAG + jurisdiction tools used by custom_tools
-├── channels/             Twilio SMS + Voice webhooks → handle_message
+├── channels/             Twilio webhooks
+│   ├── sms.py              SMS → managed_agents.handle_message
+│   ├── voice.py            Voice: chained TwiML (/gather → /continue → /audio),
+│   │                       ElevenLabs <Play> with Polly fallback
+│   └── tts.py              ElevenLabs synth + static/dynamic MP3 caches
 ├── db/                   Supabase schema + migrations
 └── kb/                   governance_kb seed
 
