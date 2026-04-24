@@ -1,34 +1,40 @@
-"""Twilio Voice webhooks — day-one pipeline with ElevenLabs TTS.
+"""Twilio Voice webhooks — streaming voice pipeline.
 
 Flow:
-  Twilio <Gather input=speech>     → we receive transcribed text
-  → handle_message via CMA session → Claude reply
-  → ElevenLabs synth to MP3        → cached in-process
-  → TwiML <Play>/audio/{cid}.mp3   → Twilio fetches and streams
+  Twilio <Gather input=speech>    → SpeechResult
+  → /gather queues the turn, returns <Play>/reply/{cid}.mp3 immediately
+  → Twilio fetches /reply/{cid}.mp3 and plays bytes as they arrive
+  → Inside that request:
+      - drive a direct Claude Messages API stream (tools + history)
+      - split Claude's tokens into sentences
+      - fire ElevenLabs synth on each complete sentence
+      - yield MP3 chunks straight back to Twilio
 
-If ElevenLabs synthesis fails (quota, rate limit, outage), we degrade to
-a Polly <Say> TwiML for the same text — voice quality drops but the call
-stays up. Errors are logged so the ElevenLabs config can be fixed
-without paging anyone.
+The /gather handler does NOT wait for the reply — it returns TwiML in
+milliseconds with a <Play> URL. Twilio fetches that URL, we hold the
+HTTP response open, and audio flows as Claude + ElevenLabs produce it.
+Caller hears the first sentence ~1–2 s after they finish speaking,
+instead of ~5–7 s with the buffered CMA path.
 
-Latency today is ~9–12s end-to-end on Brown Act questions (Opus 4.7 is
-thorough but not instant). Replies that exceed Twilio's ~15s webhook
-timeout play "application error" instead of the real reply — mostly hit
-on escalation paths that use two tool round-trips.
-
-Friday upgrade (playbook §7.1): Twilio Media Streams + Deepgram (STT) +
-ElevenLabs streaming TTS. Audio starts playing after the first Claude
-token, so perceived latency is sub-second and the 15s ceiling goes away.
-Same handle_message underneath — only the transport changes.
+CMA is retained for SMS (see app/managed_agents/) because text doesn't
+need token-level streaming and CMA's built-in session memory is free.
+Voice uses the direct Messages API for latency.
 """
 import logging
 from html import escape
 
 from fastapi import APIRouter, Form, Response
 from fastapi.concurrency import run_in_threadpool
+from fastapi.responses import StreamingResponse
 
-from app.channels.tts import pop_audio, synthesize, synthesize_static
-from app.managed_agents.client import handle_message
+from app.channels.tts import (
+    pop_audio,
+    pop_text,
+    queue_text,
+    stream_synth,
+    synthesize_static,
+)
+from app.voice_pipeline import forget_call, pop_turn, queue_turn, run_turn
 
 log = logging.getLogger(__name__)
 router = APIRouter()
@@ -46,11 +52,11 @@ _GATHER = (
 )
 
 
-def _play_twiml(cid: str, gather: bool = True) -> str:
+def _play_twiml(play_path: str, gather: bool = True) -> str:
     return (
         '<?xml version="1.0" encoding="UTF-8"?>'
         "<Response>"
-        f'<Play>/twilio/voice/audio/{cid}.mp3</Play>'
+        f"<Play>{play_path}</Play>"
         f"{_GATHER if gather else ''}"
         "</Response>"
     )
@@ -67,16 +73,14 @@ def _say_twiml(text: str, gather: bool = True) -> str:
     )
 
 
-async def _speak(text: str, static_key: str | None = None) -> str:
-    """Synthesize via ElevenLabs, fall back to Polly Say on failure."""
+async def _speak_static(key: str, text: str) -> str:
+    """TwiML for static prompts (greeting/reprompt). Synthesized once per
+    process, served from memory. Falls back to Polly on TTS failure."""
     try:
-        if static_key is not None:
-            cid = await run_in_threadpool(synthesize_static, static_key, text)
-        else:
-            cid = await run_in_threadpool(synthesize, text)
-        return _play_twiml(cid)
+        cid = await run_in_threadpool(synthesize_static, key, text)
+        return _play_twiml(f"/twilio/voice/audio/{cid}.mp3")
     except Exception:
-        log.exception("ElevenLabs TTS failed — falling back to Polly Say")
+        log.exception("ElevenLabs static synth failed — falling back to Polly")
         return _say_twiml(text)
 
 
@@ -85,7 +89,7 @@ async def inbound_call(
     From: str = Form(...), CallSid: str = Form(...)
 ) -> Response:
     """First touch: greet, then gather the caller's first utterance."""
-    twiml = await _speak(GREETING, static_key="greeting")
+    twiml = await _speak_static("greeting", GREETING)
     return Response(content=twiml, media_type="application/xml")
 
 
@@ -95,26 +99,80 @@ async def gather(
     CallSid: str = Form(...),
     SpeechResult: str = Form(""),
 ) -> Response:
-    """One caller turn → one CMA turn → speak reply → gather again."""
+    """Queue the turn, return TwiML immediately pointing at /reply."""
     if not SpeechResult.strip():
-        twiml = await _speak(REPROMPT, static_key="reprompt")
+        twiml = await _speak_static("reprompt", REPROMPT)
         return Response(content=twiml, media_type="application/xml")
 
-    reply_text = await run_in_threadpool(
-        handle_message, From, SpeechResult, "voice"
-    )
-    twiml = await _speak(reply_text)
+    cid = queue_turn(CallSid, From, SpeechResult)
+    twiml = _play_twiml(f"/twilio/voice/reply/{cid}.mp3")
     return Response(content=twiml, media_type="application/xml")
+
+
+@router.post("/status")
+async def call_status(
+    CallSid: str = Form(...), CallStatus: str = Form(""),
+) -> Response:
+    """Twilio fires this on call status changes. On completion, drop
+    the in-memory history for this CallSid so we don't leak memory."""
+    if CallStatus in ("completed", "failed", "busy", "no-answer", "canceled"):
+        forget_call(CallSid)
+        log.info("forgot call %s (%s)", CallSid, CallStatus)
+    return Response(status_code=204)
+
+
+@router.get("/reply/{cid}.mp3")
+def reply_stream(cid: str) -> Response:
+    """Twilio fetches this URL for a dynamic reply. We drive the Claude
+    turn (streaming Messages API) and pipe ElevenLabs MP3 chunks back as
+    each sentence completes. Sync generator: FastAPI handles it in a
+    worker thread, so blocking Anthropic/ElevenLabs HTTP calls are fine."""
+    turn = pop_turn(cid)
+    if turn is None:
+        return Response(status_code=404)
+
+    def _iter():
+        try:
+            yield from run_turn(
+                call_sid=turn["call_sid"],
+                phone=turn["phone"],
+                user_text=turn["user_text"],
+            )
+        except Exception:
+            log.exception("voice reply stream failed mid-flight")
+
+    return StreamingResponse(
+        _iter(),
+        media_type="audio/mpeg",
+        headers={"Cache-Control": "no-store"},
+    )
 
 
 @router.get("/audio/{cid}.mp3")
 async def serve_audio(cid: str) -> Response:
-    """Twilio fetches the MP3 here. One-shot cache — entry is popped on fetch."""
+    """Static / queued-text audio. Used by the greeting + reprompt paths
+    (static cache) and any legacy queue_text consumers. The main dynamic
+    reply flow uses /reply/{cid}.mp3 above."""
     audio = pop_audio(cid)
-    if audio is None:
-        return Response(status_code=404)
-    return Response(
-        content=audio,
-        media_type="audio/mpeg",
-        headers={"Cache-Control": "no-store"},
-    )
+    if audio is not None:
+        return Response(
+            content=audio,
+            media_type="audio/mpeg",
+            headers={"Cache-Control": "no-store"},
+        )
+    text = pop_text(cid)
+    if text is not None:
+        def _iter():
+            try:
+                for chunk in stream_synth(text):
+                    if chunk:
+                        yield chunk
+            except Exception:
+                log.exception("ElevenLabs streaming synth failed mid-flight")
+
+        return StreamingResponse(
+            _iter(),
+            media_type="audio/mpeg",
+            headers={"Cache-Control": "no-store"},
+        )
+    return Response(status_code=404)
