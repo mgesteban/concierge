@@ -33,6 +33,14 @@ governance_tools.zip
 *.pdf
 # The playbook is personal strategy notes, not shipped artifact.
 boardbreeze-concierge-playbook-*.md
+# Demo video script — personal, not a shipped artifact.
+video_script*.md
+# KB source materials — third-party licensed (AALRR PDF covered by *.pdf
+# above) and Grace's not-public-facing product FAQ. See
+# project_kb_source_files memory for why.
+BoardBreeze Comprehensive FAQ*.md
+# Personal test-question bank for live demo + recording rehearsals.
+Questions*.md
 # IDE workspace files are per-machine.
 *.code-workspace
 

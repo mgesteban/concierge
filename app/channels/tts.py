@@ -26,6 +26,7 @@ from __future__ import annotations
 
 import logging
 import os
+import re
 import uuid
 from collections.abc import Iterator
 from functools import lru_cache
@@ -65,11 +66,93 @@ def _prune(cache: dict) -> None:
             cache.pop(k, None)
 
 
+# ---------------------------------------------------------------------------
+# Pre-synth text normalization
+# ---------------------------------------------------------------------------
+# ElevenLabs Flash v2.5 mispronounces multi-digit dollar amounts ("$99",
+# "$499") often enough to be a real demo problem — they come out blurred
+# or run together. The KB has prices stored as "$29.99/month" verbatim,
+# and the Concierge tends to read them straight back, so we have to
+# normalize before synth rather than rely on the model. Spelled-out
+# numbers ("ninety-nine dollars") synthesize cleanly.
+# ---------------------------------------------------------------------------
+
+_ONES = (
+    "zero", "one", "two", "three", "four", "five", "six", "seven", "eight",
+    "nine", "ten", "eleven", "twelve", "thirteen", "fourteen", "fifteen",
+    "sixteen", "seventeen", "eighteen", "nineteen",
+)
+_TENS = (
+    "", "", "twenty", "thirty", "forty", "fifty", "sixty", "seventy",
+    "eighty", "ninety",
+)
+
+
+def _int_to_words(n: int) -> str:
+    """Render 0..9999 as English words. Outside that range, fall back to
+    the digit string — the Concierge doesn't quote larger numbers in the
+    demo path."""
+    if n < 0:
+        return f"minus {_int_to_words(-n)}"
+    if n < 20:
+        return _ONES[n]
+    if n < 100:
+        if n % 10 == 0:
+            return _TENS[n // 10]
+        return f"{_TENS[n // 10]}-{_ONES[n % 10]}"
+    if n < 1000:
+        head = f"{_ONES[n // 100]} hundred"
+        rest = n % 100
+        return head if rest == 0 else f"{head} {_int_to_words(rest)}"
+    if n < 10000:
+        head = f"{_ONES[n // 1000]} thousand"
+        rest = n % 1000
+        return head if rest == 0 else f"{head} {_int_to_words(rest)}"
+    return str(n)
+
+
+# $X.YY → "X dollars and YY cents" (or "X dollars" when YY == 0)
+_MONEY_DECIMAL_RE = re.compile(r"\$\s*(\d+)\.(\d{2})\b")
+# $X → "X dollars"
+_MONEY_INTEGER_RE = re.compile(r"\$\s*(\d+)\b")
+
+
+def _normalize_money(text: str) -> str:
+    def _decimal(m: re.Match) -> str:
+        dollars = int(m.group(1))
+        cents = int(m.group(2))
+        if cents == 0:
+            return f"{_int_to_words(dollars)} dollars"
+        return (
+            f"{_int_to_words(dollars)} dollars and "
+            f"{_int_to_words(cents)} cents"
+        )
+
+    text = _MONEY_DECIMAL_RE.sub(_decimal, text)
+    text = _MONEY_INTEGER_RE.sub(
+        lambda m: f"{_int_to_words(int(m.group(1)))} dollars", text,
+    )
+    return text
+
+
+# "$99/month" → "$99 per month" (natural speech instead of literal "slash").
+# Run before money normalization so the dollar regex still matches.
+_PER_MONTH_RE = re.compile(r"/\s*month\b", re.IGNORECASE)
+
+
+def normalize_for_speech(text: str) -> str:
+    """Pre-synth cleanup. Currently: dollar amounts → words and
+    "/month" → " per month". Extend here when other speak-as-words
+    patterns surface."""
+    text = _PER_MONTH_RE.sub(" per month", text)
+    return _normalize_money(text)
+
+
 def _convert(text: str) -> Iterator[bytes]:
     """Raw ElevenLabs streaming synth. Yields MP3 chunks as they arrive."""
     return _client().text_to_speech.convert(
         voice_id=os.environ["ELEVENLABS_VOICE_ID"],
-        text=text,
+        text=normalize_for_speech(text),
         model_id=_MODEL_ID,
         output_format=_OUTPUT_FORMAT,
     )

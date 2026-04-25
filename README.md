@@ -56,10 +56,11 @@ A voice + SMS concierge for [appboardbreeze.com](https://appboardbreeze.com/), t
                             ▼                               ▼
                   ┌──────────────────┐         ┌──────────────────┐
                   │ search_governance│         │ verify_citation  │
-                  │ _kb              │         │ (Haiku 4.5)      │
-                  │ (Voyage 512-dim  │         │ section lookup + │
-                  │  + Supabase      │         │ claim-support    │
-                  │  pgvector)       │         │ classifier       │
+                  │ _kb     +        │         │ (Haiku 4.5)      │
+                  │ search_product_kb│         │ section lookup + │
+                  │ (Voyage 512-dim  │         │ claim-support    │
+                  │  + Supabase      │         │ classifier       │
+                  │  pgvector)       │         │                  │
                   └──────────────────┘         └──────────────────┘
 
                            ┌──────────────────┐
@@ -69,7 +70,9 @@ A voice + SMS concierge for [appboardbreeze.com](https://appboardbreeze.com/), t
                            └──────────────────┘
 ```
 
-The voice path and SMS path share the same custom tools (`search_governance_kb`, `verify_citation`, `escalate_to_grace`) — the same backend handlers in `app/managed_agents/custom_tools.py`. They diverge only at the turn loop: SMS runs on Claude Managed Agents (free cross-session memory, idle for weeks at no cost); voice runs on the direct Messages API to fit inside Twilio's ~15 s webhook ceiling.
+The voice path and SMS path share the same custom tools (`search_governance_kb`, `search_product_kb`, `verify_citation`, `escalate_to_grace`) — the same backend handlers in `app/managed_agents/custom_tools.py`. They diverge only at the turn loop: SMS runs on Claude Managed Agents (free cross-session memory, idle for weeks at no cost); voice runs on the direct Messages API to fit inside Twilio's ~15 s webhook ceiling.
+
+**The KB.** A single Supabase `governance_kb` table backs both retrieval tools. Rows tagged `jurisdiction='CA' / 'CA_STATE' / 'any'` are public-meeting law (Brown Act, Bagley-Keene, Robert's Rules, Ed Code) — 20 hand-curated chunks with exact statutory citations. Rows tagged `jurisdiction='product'` are the BoardBreeze product FAQ — 61 chunks covering plans, pricing, free trial, auth, audio formats, transcription, minutes formatting, security, and the glossary. Embeddings are Voyage `voyage-3-lite` (512-dim); retrieval is pgvector cosine similarity via the `match_governance_kb` RPC.
 
 ---
 
@@ -85,6 +88,20 @@ The same pattern is enforced as a project rule in [CLAUDE.md](./CLAUDE.md) so it
 
 ---
 
+## What Opus 4.6 couldn't do
+
+Three concrete behaviors made 4.6 the wrong fit for this product. Each one mapped to a specific change we made for 4.7.
+
+**1. Mode coherence under tool use.** The Concierge holds five specialist modes in a single system prompt. On 4.6, after a tool call returned (e.g. `search_governance_kb` mid-sales-conversation), the model drifted back to whichever mode the prompt mentioned first — typically Governance — and re-introduced a citation the caller hadn't asked for. 4.7 stays locked on the active mode through the tool round trip and resumes the conversation in the same register the caller was already in. Same prompt, same KB, different model: 4.7 ships, 4.6 doesn't.
+
+**2. Long-call thread continuity.** A real support call can run 10+ minutes and 30–40 turns; an SMS thread can span days. Per the framing of 4.7's release, 4.6 loses the thread at that length. We chose to lean on 4.7's longer coherent context rather than paper over the gap with a hand-rolled summarizer in the prompt. The visible payoff is the "Jane texts Monday, again Thursday" cross-session memory flow — same CMA session, no summarization, agent picks up where Monday left off.
+
+**3. Literal instruction-following as a feature, not a bug.** Prompt writers used to over-emphasize prohibitions in caps lock ("NEVER do X", "ALWAYS do Y") because earlier models were loose. 4.7 follows those instructions literally, which means a `NEVER` instruction over-triggers and refuses adjacent legitimate behavior. We adapted: the Concierge system prompt uses conditional language throughout ("avoid X unless Y; here's how to handle the edge case"). The Governance Expert mode now explains *what the Brown Act is* without refusing, while still declining jurisdiction-specific legal advice that requires interpreting a statute against a caller's specific facts. [CLAUDE.md rule #1](./CLAUDE.md) enforces this convention for future prompt edits.
+
+The `verify_citation` layer is what makes the literal-following bet safe in production: even when 4.7 is willing to cite a section, the tool contract gates the citation against the actual KB text. That contract isn't a "should" the model needs to remember — it's a function call the agent has to make before it speaks.
+
+---
+
 ## How we used Claude Managed Agents
 
 After Michael Cohen's Thursday session at the hackathon, we pivoted from a planned six-agent supervisor topology to **one Managed Agent + specialist modes** — Anthropic's currently-recommended pattern. First-class multi-agent is shipping soon; this architecture upgrades cleanly when it does. See [`notes/cohen-managed-agents.md`](./notes/cohen-managed-agents.md) for the direct quotes.
@@ -93,7 +110,7 @@ What we use from CMA, idiomatically:
 
 - **Agent + environment:** `boardbreeze-concierge` / `boardbreeze-concierge-env`, provisioned via `ensure_agent` / `ensure_environment` (idempotent, name-keyed find-or-create).
 - **Sessions, one per caller phone:** the `phone_sessions` table maps E.164 → CMA `session_id`, so cross-session memory ("Jane texts Monday, again Thursday") is free on the SMS path. CMA sessions idle for weeks at no cost.
-- **Custom tools:** `search_governance_kb`, `verify_citation`, `escalate_to_grace` — registered as CMA custom tools whose handlers run in our FastAPI backend, not in the CMA sandbox. Keeps Supabase + Twilio credentials out of the agent's reach.
+- **Custom tools:** `search_governance_kb`, `search_product_kb`, `verify_citation`, `escalate_to_grace` — registered as CMA custom tools whose handlers run in our FastAPI backend, not in the CMA sandbox. Keeps Supabase + Twilio credentials out of the agent's reach.
 
 **Voice exception:** the voice channel runs on the direct Messages API rather than CMA. We measured ~6 s of CMA event-stream overhead on identical Opus 4.7 prompts (CMA first event at 7.66 s vs Messages API TTFT at 0.98 s, done at 1.68 s), which is unworkable inside Twilio's ~15 s webhook ceiling. The voice path re-implements the same tool dispatch loop in `app/voice_pipeline.py` against the same backend handlers, so behavior is identical — only the model interface differs.
 
@@ -138,6 +155,7 @@ Twilio webhooks have a hard ~15 s response budget; live voice needs to feel snap
 - **v3 (Thu afternoon).** ElevenLabs replaced Polly on voice for quality; tightened reply cap to ~30 words to fit the latency budget; added Polly fallback so voice degrades gracefully under ElevenLabs outages.
 - **v4 (Thu evening).** Measured CMA at ~6 s overhead and moved the voice path to the direct Messages API with sentence-level streaming. SMS stayed on CMA where cross-session continuity matters more than first-token latency.
 - **v5 (Thu late evening).** Live test exposed Twilio's `<Play>` buffer eating 6 s of audio. Restructured to chained TwiML (`/gather` filler → background turn → `/continue` reply). Filler at ~500 ms, real reply at ~2.5 s.
+- **v6 (Sat).** Closed the Product Expert mode's KB hole. Grace's internal BoardBreeze FAQ (28 sections) chunked into 61 product rows alongside the 20 governance rows in the same `governance_kb` table, tagged `jurisdiction='product'`. New `search_product_kb` tool (same Supabase RPC, jurisdiction-pinned) so Product Expert mode answers pricing / plan / feature questions from authoritative source rather than model recall. Without this, the agent dodged "what's your pricing" with a callback offer; with this, it cites the actual $29.99 / $99 / $499 tiers.
 
 See [`Progress.md`](./Progress.md) for the day-by-day narrative and [`CHANGELOG.md`](./CHANGELOG.md) for per-commit detail.
 
@@ -157,7 +175,8 @@ boardbreeze-concierge-voice/
 │   │   ├── agent_spec.py           system prompt, custom tool defs
 │   │   ├── client.py               ensure_agent/environment/session +
 │   │   │                           handle_message
-│   │   └── custom_tools.py         backend dispatch for search_kb,
+│   │   └── custom_tools.py         backend dispatch for
+│   │                               search_governance_kb, search_product_kb,
 │   │                               verify_citation, escalate_to_grace
 │   │                               (shared with voice_pipeline)
 │   ├── agents/                   v0 reference loop only — nothing imports it
@@ -167,7 +186,9 @@ boardbreeze-concierge-voice/
 │   │   ├── voice.py                Twilio Voice: chained TwiML, Polly fallback
 │   │   └── tts.py                  ElevenLabs synth + static/dynamic caches
 │   ├── db/                       Supabase schema + migrations (phone_sessions)
-│   └── kb/                       governance_kb seed
+│   └── kb/                       governance_kb seed (statute chunks + the
+│                                 BoardBreeze FAQ chunker — both go into one
+│                                 table, distinguished by `jurisdiction`)
 ├── .claude/skills/               /interview, /governance-verify, /status
 ├── notes/                        external-intel notes (Cohen talk, etc.)
 ├── tests/                        offline tests, no network/keys required
@@ -196,7 +217,11 @@ cp .env.example .env
 # Run app/db/schema.sql then app/db/migrations/001_phone_sessions.sql
 # in the Supabase SQL editor.
 
-# 4. Seed the governance KB
+# 4. Seed the KB (governance statutes + BoardBreeze product FAQ).
+# Place the FAQ markdown at the repo root as
+# "BoardBreeze Comprehensive FAQ — AI Agent Knowledge Base.md"
+# (gitignored — supply your own product KB if reproducing). The
+# governance chunks ship inside seed_kb.py and need no extra files.
 python -m app.kb.seed_kb
 
 # 5. Run tests (offline, no keys needed)

@@ -239,3 +239,122 @@ done. Revised list:
    the demo narrative.
 
 ---
+
+## 2026-04-25 (Sat) — Product KB + demo-script polish (recording day eve)
+
+**The headline**
+
+Submission deadline is tomorrow Sun 8 PM EST. Today is recording-day
+prep. The biggest gap: `search_governance_kb` was authoritative but the
+Product Expert mode had no KB at all — it was leaning on whatever the
+model knew about BoardBreeze. So a caller asking "what's the difference
+between Pro and Enterprise" would either get vague hand-waving or, worse,
+invented numbers. Today we closed that hole.
+
+**Shipped today**
+
+- **Product KB seeded.** Grace's internal *BoardBreeze Comprehensive FAQ
+  — AI Agent Knowledge Base* (28 sections, 60 KB of markdown) chunked
+  into 61 rows tagged `jurisdiction='product'` and inserted into the
+  same `governance_kb` table alongside the existing 20 governance
+  chunks (Brown Act, Bagley-Keene, Robert's Rules, Ed Code). 81 rows
+  total. The FAQ markdown source was an export with double-escaped
+  punctuation (`1\\.` for list numbers, `\#\#` for headings) — the
+  chunker in `app/kb/seed_kb.py` runs the unescape regex to a fixed
+  point so both layers come off cleanly. Sections 24, 25, 27 (subscriber
+  PII / outreach-internal / blog post titles) excluded.
+- **`search_product_kb` custom tool.** Backed by the same Supabase RPC
+  (`match_governance_kb`) pinned to `jurisdiction='product'`. Registered
+  in `_HANDLERS` so both the voice direct-Messages turn loop and the CMA
+  SMS path resolve it through one dispatcher. System prompt's Product
+  Expert mode rewritten to call it for anything where a number or
+  specific behavior matters.
+- **Smoke retrieval verified.** Pricing query → §5 Pricing & Plans top
+  hit @ 0.538. Free trial query → §6 Free Trial Details @ 0.582 tied
+  for top. File formats query → §8 Audio Upload in top-5. Governance
+  baseline preserved: agenda-posting query still returns Gov. Code
+  § 54954.2 top hit @ 0.693, exactly as on Thursday.
+- **Demo video script drafted + edited.** Working copy at
+  `video_script.md` (gitignored). Grace's voice and jokes preserved
+  intact ("knows parliamentary procedure better than she knows Python",
+  "country of Manny Pacquiao", the Claude-Code/Opus-4.7 callback gag);
+  ESL grammar smoothed, escaped-markdown punctuation cleaned, and the
+  rhetorical questions italicized so the punchline contrast lands when
+  read aloud. Video records tomorrow morning.
+- **Source-file hygiene.** AALRR Brown Act PDF and the BoardBreeze FAQ
+  markdown both gitignored — third-party copyright on the PDF, "NOT
+  public-facing" in the FAQ's own header. Auto-memory updated.
+
+**What evolved (Keep Thinking)**
+
+- The original plan for today (per playbook §11 Sat) was to seed from
+  the Brown Act PDF + Bagley-Keene PDF. We pivoted: the BoardBreeze FAQ
+  was the higher-leverage seed because the *governance* KB was already
+  authoritative for the demo's headline statute (§ 54954.2, the
+  72-hour rule), but the *product* path had nothing. A caller in the
+  video asking "what's your pricing" was the visible failure mode —
+  fixing it changes the demo from "watch the agent dodge a pricing
+  question" to "watch it cite the actual $29.99 / $99 / $499 tiers."
+- We almost added a separate `search_kb` umbrella tool with a `domain`
+  filter, then walked that back. Two named tools (`search_governance_kb`
+  and `search_product_kb`) read more clearly to a judge skimming the
+  tool roster and don't require renaming the existing tool's call sites.
+  Cost is one duplicated input schema; benefit is no behavior change to
+  any of Thursday's verified-working paths.
+- Voice path picks up the new tool + prompt for free because
+  `voice_pipeline.py` reads `SYSTEM_PROMPT` and `CUSTOM_TOOLS` fresh on
+  every turn. CMA-side SMS does not — `ensure_agent()` is find-or-create
+  with no update branch, so the existing CMA agent
+  (`agent_011CaMckX2etSZait4iM4kfi`) is locked to Thursday's tool list.
+  Punted the agent re-provisioning to post-recording: the demo video is
+  voice-led, and SMS continues to work for governance questions through
+  the existing `search_governance_kb` tool.
+
+**Cut from today's plan**
+
+- AALRR PDF ingestion. The hand-curated 20 Brown Act / Bagley-Keene
+  chunks already cover every statute we cite in the video script, and
+  the verify_citation golden suite passes 10/10 against them. Adding
+  the AALRR text would be additive, not corrective — saved for after
+  submission.
+- Admin dashboard via Claude Design + Remotion (playbook §10 / §12.3).
+  The video demos the call, not a dashboard pan; per playbook §12.3's
+  own warning ("don't sacrifice the call demo to make a fancy
+  animation"), this is the right cut.
+- Self-improvement loop on accumulated transcripts (playbook §16.4).
+  No real call volume yet to feed it — would need at least a handful
+  of live subscriber test calls first.
+
+**Tomorrow's top 3 (Sun Apr 26 — submission day)**
+
+1. **Record the video** (morning). 4-hour budget per playbook. Script
+   lives at `video_script.md`. The Product Expert demo segment now
+   has authoritative pricing/plan retrieval to ground its answer.
+2. **README submission-checklist sections** (playbook §13). Two
+   missing sections to write: "What Opus 4.6 couldn't do" and "How we
+   caught hallucinations: the verification layer." Plus the standalone
+   written description (problem / users / Opus 4.7 use / CMA use /
+   v0→v5 evolution) — most of the source material is in this log.
+3. **Re-provision the CMA agent** so SMS sees `search_product_kb` too.
+   Either `agents.update()` if the SDK supports it, or archive + create
+   under a new name with the existing sessions preserved. Defer to
+   post-recording so a regression here can't break the demo.
+4. **Submit ≥2 hours before the 8 PM EST deadline** (playbook §15).
+
+**Open questions / risks**
+
+- Live phone smoke-test of the voice path against the new product KB
+  hasn't been run yet. Code-level retrieval works (verified via the
+  Python smoke script), but the chained-TwiML path under a real Twilio
+  call has only been tested on governance questions. The first product
+  question on a live call is technically untested. Worth a 10-minute
+  call test before recording starts.
+- Two of the five "modes" in the system prompt (Tech Support, Sales
+  Closer) still escalate as their primary action rather than answering.
+  That's intentional for a one-week build — humans handle nuance better
+  than today's prompt — but it means the video's Sales-Closer beat
+  ("books a demo on the calendar") will involve an SMS to Grace rather
+  than a live calendar booking. Calendar MCP wiring deferred to
+  post-deadline.
+
+---

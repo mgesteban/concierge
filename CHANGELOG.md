@@ -5,6 +5,47 @@ Format loosely follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+### Sat 2026-04-25 — Product KB + Product Expert tool
+
+#### Added
+- `app/kb/seed_kb.py::load_faq_chunks` — chunker for the BoardBreeze
+  Comprehensive FAQ (28 sections, 60 KB). Unescapes the export's
+  double-escaped punctuation (`\\.`, `\#\#`) to a fixed point, splits
+  top-level sections, and sub-chunks anything over 1800 chars on
+  `### ` subheadings. Sections 24, 25, 27 (subscriber PII / outreach
+  internals / blog post titles) excluded from the seed.
+- `search_product_kb` custom tool — `app/managed_agents/agent_spec.py`
+  + `app/managed_agents/custom_tools.py`. Backed by the same
+  `match_governance_kb` Supabase RPC, pinned to `jurisdiction='product'`.
+  Registered in the shared `_HANDLERS` registry so both the voice
+  direct-Messages turn loop and the CMA SMS path resolve it through
+  one dispatcher.
+- KB rows: 20 governance + 61 product = 81 total in `governance_kb`.
+
+#### Changed
+- Product Expert mode in the system prompt rewritten to call
+  `search_product_kb` for anything where exactness matters (pricing
+  tiers, plan limits, supported formats, transcription details).
+  Replaces "give a plain-language answer" with grounded retrieval.
+- README "Architecture" section updated to show the unified KB and
+  the two retrieval tools. Added "What Opus 4.6 couldn't do" section
+  per playbook §13 / §14. Added v6 entry to the evolution narrative.
+- `.env.example`: removed the unused `DEEPGRAM_API_KEY` entry —
+  Deepgram never got wired (voice STT runs through Twilio's
+  `<Gather input="speech">`).
+
+#### Verified
+- Retrieval smoke: pricing query → §5 Pricing & Plans top hit @ 0.538;
+  free trial query → §6 Free Trial Details @ 0.582; agenda-posting
+  governance query → Gov. Code § 54954.2 @ 0.693 (unchanged from Thu).
+
+#### Deferred
+- Re-provisioning the existing CMA agent so SMS sees `search_product_kb`.
+  `ensure_agent()` is find-or-create only, no update branch. Voice
+  picks up the new tool automatically (`voice_pipeline.py` reads tools
+  fresh per turn); SMS continues to work for governance through the
+  existing tool roster. Punted to post-recording.
+
 ### Thu 2026-04-23 (evening) — Voice latency fight, real anti-hallucination, real escalation
 
 After the morning CMA pivot landed, the rest of Thursday was spent

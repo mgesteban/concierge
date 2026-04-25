@@ -2,17 +2,18 @@
 One-shot seed script for governance_kb.
 
 Run:
-    python -m db.seed_kb
+    python -m app.kb.seed_kb
 
 What it does:
-  - Loads a hand-authored set of authoritative chunks with exact citations.
+  - Loads a hand-authored set of authoritative governance chunks with
+    exact statutory citations (Brown Act, Bagley-Keene, Robert's Rules).
+  - Loads the BoardBreeze product FAQ from
+    `BoardBreeze Comprehensive FAQ — AI Agent Knowledge Base.md` at the
+    repo root, unescapes its markdown export artifacts, and chunks it
+    by section. Tagged `jurisdiction='product'` so the Concierge's
+    `search_product_kb` tool can target it.
   - Embeds each chunk with Voyage (voyage-3-lite, 512-dim).
   - Bulk-inserts into Supabase.
-
-Extend freely:
-  - Ingest the full Brown Act text (public domain: California Government Code).
-  - Add Robert's Rules 12th ed. paraphrases (own paraphrase, NOT verbatim).
-  - Add BoardBreeze product help articles.
 
 Why paraphrase instead of verbatim statutes?
   California statutes are public domain, but paraphrases retrieve better
@@ -21,7 +22,9 @@ Why paraphrase instead of verbatim statutes?
   Governance Expert cites out loud.
 """
 import os
+import re
 import sys
+from pathlib import Path
 
 from app.tools.governance_tools.db import get_supabase
 from app.tools.governance_tools.embeddings import embed_batch
@@ -349,17 +352,116 @@ SEED_CHUNKS: list[dict] = [
 ]
 
 
+# ---------------------------------------------------------------------------
+# BoardBreeze FAQ loader (product KB)
+# ---------------------------------------------------------------------------
+# The FAQ markdown is an export from a tool that escaped most punctuation
+# (\#, \*, \., \(, \), etc.). We strip those before chunking so the
+# embeddings see clean prose.
+#
+# Sections 24 (User Database) and 25 (Onboarding Emails Already Sent) are
+# excluded — they contain subscriber PII we don't want a phone agent
+# reading aloud. Section 27 (Blog Content Available) is excluded because
+# it's a long list of blog post titles that adds retrieval noise without
+# helping callers.
+# ---------------------------------------------------------------------------
+
+REPO_ROOT = Path(__file__).resolve().parents[2]
+FAQ_PATH = REPO_ROOT / "BoardBreeze Comprehensive FAQ — AI Agent Knowledge Base.md"
+
+PRODUCT_SECTION_SKIP = {24, 25, 27}
+SUBCHUNK_THRESHOLD_CHARS = 1800  # split sections larger than this on `### `
+
+_FAQ_ESCAPE_RE = re.compile(r"\\([^a-zA-Z0-9])")
+_FAQ_SECTION_RE = re.compile(r"^## (\d+)\. (.+)$", re.MULTILINE)
+_FAQ_SUBSECTION_RE = re.compile(r"^### (.+)$", re.MULTILINE)
+
+
+def _faq_unescape(text: str) -> str:
+    # The export double-escapes some chars (e.g. "1\\." for a list number).
+    # Loop until the substitution converges so both layers come off.
+    while True:
+        new = _FAQ_ESCAPE_RE.sub(r"\1", text)
+        if new == text:
+            return new
+        text = new
+
+
+def _faq_split_section(num: int, title: str, body: str) -> list[dict]:
+    body = re.sub(r"\n---\s*$", "", body).strip()
+    if not body:
+        return []
+
+    base = {
+        "source": f"BoardBreeze FAQ §{num}",
+        "document": "BoardBreeze Product FAQ",
+        "jurisdiction": "product",
+        "agency_types": [],
+    }
+
+    if (
+        len(body) < SUBCHUNK_THRESHOLD_CHARS
+        or not _FAQ_SUBSECTION_RE.search(body)
+    ):
+        return [{**base, "section_title": title, "content": body}]
+
+    parts: list[dict] = []
+    matches = list(_FAQ_SUBSECTION_RE.finditer(body))
+    if matches[0].start() > 0:
+        prelude = body[: matches[0].start()].strip()
+        if prelude:
+            parts.append({**base, "section_title": title, "content": prelude})
+    for i, m in enumerate(matches):
+        sub_title = m.group(1).strip()
+        start = m.end()
+        end = matches[i + 1].start() if i + 1 < len(matches) else len(body)
+        sub_body = body[start:end].strip()
+        if sub_body:
+            parts.append(
+                {
+                    **base,
+                    "section_title": f"{title} — {sub_title}",
+                    "content": sub_body,
+                }
+            )
+    return parts
+
+
+def load_faq_chunks() -> list[dict]:
+    if not FAQ_PATH.exists():
+        print(f"FAQ source not found at {FAQ_PATH} — skipping product KB.")
+        return []
+
+    raw = _faq_unescape(FAQ_PATH.read_text(encoding="utf-8"))
+    headings = list(_FAQ_SECTION_RE.finditer(raw))
+    chunks: list[dict] = []
+    for i, m in enumerate(headings):
+        num = int(m.group(1))
+        if num in PRODUCT_SECTION_SKIP:
+            continue
+        title = m.group(2).strip()
+        body_start = m.end()
+        body_end = (
+            headings[i + 1].start() if i + 1 < len(headings) else len(raw)
+        )
+        chunks.extend(_faq_split_section(num, title, raw[body_start:body_end]))
+    return chunks
+
+
 def main() -> int:
-    print(f"Seeding {len(SEED_CHUNKS)} KB chunks...")
+    governance = SEED_CHUNKS
+    product = load_faq_chunks()
+    all_chunks = governance + product
+    print(
+        f"Seeding {len(governance)} governance + {len(product)} product "
+        f"chunks = {len(all_chunks)} total..."
+    )
     supabase = get_supabase()
 
-    # Embed in batch for speed.
-    texts = [c["content"] for c in SEED_CHUNKS]
+    texts = [c["content"] for c in all_chunks]
     embeddings = embed_batch(texts, input_type="document")
 
-    rows = []
-    for chunk, emb in zip(SEED_CHUNKS, embeddings):
-        rows.append({**chunk, "embedding": emb})
+    rows = [{**c, "embedding": e} for c, e in zip(all_chunks, embeddings)]
 
     # Wipe + reinsert so this script is idempotent.
     supabase.table("governance_kb").delete().gt(

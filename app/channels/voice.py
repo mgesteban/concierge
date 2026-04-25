@@ -21,6 +21,7 @@ need token-level streaming and CMA's built-in session memory is free.
 Voice uses the direct Messages API for latency.
 """
 import logging
+import re
 from html import escape
 
 from fastapi import APIRouter, Form, Response
@@ -49,8 +50,9 @@ router = APIRouter()
 
 
 GREETING = (
-    "Hi, this is BoardBreeze's AI concierge. I can help with governance "
-    "questions, product support, or connect you with Grace. What's going on?"
+    "Hello! This is the BoardBreeze concierge. I can help with governance "
+    "questions, product support, pricing, or connect you with Grace. "
+    "What can I help you with today?"
 )
 REPROMPT = "Sorry, I didn't catch that. Could you say it again?"
 # Plays during /gather→/continue while Claude + synth work in the background.
@@ -63,6 +65,46 @@ FALLBACK = (
     "Sorry, I'm having trouble pulling that up right now. "
     "Could you try asking again?"
 )
+# Spoken when the caller signals the call is over. Plays + Hangup, no
+# Gather, no model round trip. Without this, "goodbye" goes through the
+# chained-TwiML flow and the caller hears the THINKING filler ("let me
+# take a quick look at that for you") before any farewell — jarring.
+FAREWELL = "Thanks for calling BoardBreeze. Have a great day!"
+
+# Server-side intent matcher for "the caller is wrapping up the call."
+# A small keyword set is plenty for the demo and avoids the cost/latency
+# of a model classification round trip. False positives here only
+# truncate a call early; false negatives just keep the existing flow.
+# "thanks" / "thank you" alone are NOT farewells — callers say them
+# mid-call after an answer and then ask the next question. Only treat
+# them as farewell when paired with bye/goodbye.
+_FAREWELL_EXACT = {
+    "bye", "goodbye", "good bye", "bye bye",
+}
+_FAREWELL_KEYWORDS = (
+    "goodbye", "good bye", "bye bye", "bye now", "bye for now",
+    "see you later", "see you", "see ya", "talk later",
+    "talk to you later", "talk soon",
+    "thanks bye", "thanks good bye", "thanks goodbye",
+    "thank you bye", "thank you good bye", "thank you goodbye",
+    "that's all", "thats all", "that is all",
+    "that's it", "thats it", "that is it",
+    "i'm done", "im done", "i am done",
+    "i'm all set", "im all set", "all set",
+    "we're done", "were done", "we are done",
+    "have a good day", "have a nice day", "have a great day",
+    "have a good one", "have a nice one", "have a great one",
+    "okay bye", "ok bye", "alright bye",
+    "hang up", "end the call", "end call",
+    "nothing else", "no more questions", "no further questions",
+)
+
+
+def _is_farewell(text: str) -> bool:
+    norm = text.strip().lower().rstrip(".!?,;:")
+    if norm in _FAREWELL_EXACT:
+        return True
+    return any(kw in norm for kw in _FAREWELL_KEYWORDS)
 
 _GATHER = (
     '<Gather input="speech" action="/twilio/voice/gather" '
@@ -132,6 +174,30 @@ async def gather(
     """
     if not SpeechResult.strip():
         twiml = await _speak_static("reprompt", REPROMPT)
+        return Response(content=twiml, media_type="application/xml")
+
+    if _is_farewell(SpeechResult):
+        try:
+            cid = await run_in_threadpool(
+                synthesize_static, "farewell", FAREWELL
+            )
+            twiml = (
+                '<?xml version="1.0" encoding="UTF-8"?>'
+                "<Response>"
+                f"<Play>/twilio/voice/audio/{cid}.mp3</Play>"
+                "<Hangup/>"
+                "</Response>"
+            )
+        except Exception:
+            log.exception("farewell synth failed — falling back to Polly")
+            twiml = (
+                '<?xml version="1.0" encoding="UTF-8"?>'
+                "<Response>"
+                f'<Say voice="Polly.Joanna">{escape(FAREWELL)}</Say>'
+                "<Hangup/>"
+                "</Response>"
+            )
+        forget_call(CallSid)
         return Response(content=twiml, media_type="application/xml")
 
     # Kick off the background turn FIRST so it runs while Twilio is

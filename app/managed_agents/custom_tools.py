@@ -94,6 +94,20 @@ def _search_governance_kb(query: str, jurisdiction: str | None = None) -> dict:
 
 
 # ---------------------------------------------------------------------------
+# search_product_kb
+# ---------------------------------------------------------------------------
+# Same Supabase RPC as the governance search, but pinned to
+# jurisdiction='product' — the rows seeded from the BoardBreeze FAQ. Lets
+# the Product Expert mode answer pricing / feature / plan questions
+# without inventing numbers, while keeping governance retrieval crisp.
+# ---------------------------------------------------------------------------
+
+
+def _search_product_kb(query: str) -> dict:
+    return _search_governance_kb(query=query, jurisdiction="product")
+
+
+# ---------------------------------------------------------------------------
 # verify_citation
 # ---------------------------------------------------------------------------
 # Two-stage check:
@@ -369,6 +383,7 @@ def _escalate_to_grace(
 
 _HANDLERS = {
     "search_governance_kb": _search_governance_kb,
+    "search_product_kb": _search_product_kb,
     "verify_citation": _verify_citation,
     "escalate_to_grace": _escalate_to_grace,
 }
