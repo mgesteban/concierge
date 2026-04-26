@@ -4,7 +4,17 @@
 
 A voice + SMS concierge for [appboardbreeze.com](https://appboardbreeze.com/), the SaaS that helps California public-agency boards run Brown-Act-compliant meetings. Callers dial or text one phone number; a single Claude Opus 4.7 agent answers governance questions, resolves product support, closes deals, and escalates to the founder when a human is actually needed.
 
-> Built for the Claude Opus 4.7 Hackathon, Apr 21–27 2026. Submission: Sun Apr 26, 8:00 PM EST.
+> My entry to the **Anthropic × Cerebral Valley Global Hackathon** (Apr 21–27 2026). Built with Claude Opus 4.7 and Claude Code.
+
+---
+
+## Try it now
+
+- **Call or text:** **1-844-786-2076**
+- **Live API:** https://concierge.appboardbreeze.com
+- **Health:** https://concierge.appboardbreeze.com/health → `{"status":"ok"}`
+
+Running 24/7 on AWS ECS Fargate (us-east-2) behind an Application Load Balancer with an Amazon-issued TLS certificate.
 
 ---
 
@@ -147,6 +157,22 @@ Twilio webhooks have a hard ~15 s response budget; live voice needs to feel snap
 
 ---
 
+## Production deployment
+
+Live in `us-east-2` on **AWS ECS Fargate**, in the same cluster as the main `appboardbreeze.com` service.
+
+- **Image:** Python 3.11 slim, ~478 MB, pushed to Amazon ECR (`boardbreeze-concierge` repo).
+- **Task:** Fargate, 1 vCPU / 2 GB, port 8000, awsvpc networking, deployment circuit-breaker with auto-rollback.
+- **Secrets:** 11 API keys (Anthropic, Twilio×3, Supabase×2, Voyage, ElevenLabs×2, Grace contact) live in **AWS Secrets Manager** as one JSON secret; the task definition projects each key into its own env var via `valueFrom`. The execution role has read access scoped to that one secret ARN — least privilege.
+- **Networking:** dedicated **Application Load Balancer** (separate from the existing CDK-managed ALB so the prod stack stays untouched), TLS via an **Amazon-issued ACM certificate** for `concierge.appboardbreeze.com`, HTTP→HTTPS 301 redirect on `:80`. Two security groups: ALB SG (public 80/443), task SG (8000 only from ALB SG).
+- **DNS:** `concierge.appboardbreeze.com` → ALB DNS via a Vercel CNAME (the apex domain registers with Vercel).
+- **Logs:** CloudWatch `/ecs/boardbreeze-concierge`, 30-day retention.
+- **Container health:** Docker `HEALTHCHECK` curls `/health` every 30 s. ALB target group hits the same path on a 15 s interval.
+
+The full step-by-step playbook with every CLI command pre-filled is in [`Deployment.md`](./Deployment.md). The original plan was AWS App Runner; we pivoted to ECS Fargate mid-hackathon to match the rest of the BoardBreeze stack and avoid running two operational mental models. The pivot took one Saturday afternoon.
+
+---
+
 ## The evolution (Keep Thinking)
 
 - **v0 (Wed).** Hand-rolled multi-agent supervisor in Python — six specialist files, keyword-routed handoffs. Reference loop kept in `app/agents/_governance_reference_loop.py` so the journey is legible.
@@ -156,6 +182,7 @@ Twilio webhooks have a hard ~15 s response budget; live voice needs to feel snap
 - **v4 (Thu evening).** Measured CMA at ~6 s overhead and moved the voice path to the direct Messages API with sentence-level streaming. SMS stayed on CMA where cross-session continuity matters more than first-token latency.
 - **v5 (Thu late evening).** Live test exposed Twilio's `<Play>` buffer eating 6 s of audio. Restructured to chained TwiML (`/gather` filler → background turn → `/continue` reply). Filler at ~500 ms, real reply at ~2.5 s.
 - **v6 (Sat).** Closed the Product Expert mode's KB hole. Grace's internal BoardBreeze FAQ (28 sections) chunked into 61 product rows alongside the 20 governance rows in the same `governance_kb` table, tagged `jurisdiction='product'`. New `search_product_kb` tool (same Supabase RPC, jurisdiction-pinned) so Product Expert mode answers pricing / plan / feature questions from authoritative source rather than model recall. Without this, the agent dodged "what's your pricing" with a callback offer; with this, it cites the actual $29.99 / $99 / $499 tiers.
+- **v7 (Sat night).** Production deployment. Started on AWS App Runner; pivoted to ECS Fargate mid-day to match the existing `appboardbreeze.com` stack pattern and consolidate ops. In one afternoon: containerized the app (Dockerfile + `.dockerignore`), pushed the image to a new ECR repo, moved 11 env values into a single AWS Secrets Manager JSON entry, built two least-privilege IAM roles, registered the task definition with Secrets Manager `valueFrom` projections, created a dedicated ALB + target group + security groups (separate from the CDK-managed ALB so the prod stack stays untouched), got an Amazon-issued ACM cert for `concierge.appboardbreeze.com` (the first attempt failed `CAA_ERROR` because Vercel's default CAA on the apex didn't authorize Amazon — added 4 records, waited 5 min for AWS's internal CAA cache to clear, retried, issued in 19 s), pointed Vercel DNS at the ALB, flipped Twilio webhooks. First production call completed end-to-end (Twilio → ALB → Fargate task → Messages API → Supabase KB → ElevenLabs → caller's ear) in ~5 s. Live at https://concierge.appboardbreeze.com. Full playbook in [`Deployment.md`](./Deployment.md).
 
 See [`Progress.md`](./Progress.md) for the day-by-day narrative and [`CHANGELOG.md`](./CHANGELOG.md) for per-commit detail.
 
@@ -189,6 +216,9 @@ boardbreeze-concierge-voice/
 │   └── kb/                       governance_kb seed (statute chunks + the
 │                                 BoardBreeze FAQ chunker — both go into one
 │                                 table, distinguished by `jurisdiction`)
+├── Dockerfile                    python:3.11-slim, port 8000, /health curl healthcheck
+├── .dockerignore                 keeps .env, KB sources, demo assets out of image
+├── Deployment.md                 12-phase ECS Fargate playbook, every CLI command pre-filled
 ├── .claude/skills/               /interview, /governance-verify, /status
 ├── notes/                        external-intel notes (Cohen talk, etc.)
 ├── tests/                        offline tests, no network/keys required
@@ -232,14 +262,16 @@ python -c "from dotenv import load_dotenv; load_dotenv('.env'); \
   from app.managed_agents.client import ensure_agent, ensure_environment; \
   print(ensure_agent(), ensure_environment())"
 
-# 7. Start the server
+# 7. Start the server (local dev)
 uvicorn app.main:app --reload --port 8000
 
-# 8. Expose to Twilio
+# 8. Expose to Twilio (local dev only)
 # In a second terminal:  ngrok http 8000
 # Point the Twilio phone number's SMS webhook   at  {ngrok}/twilio/sms/inbound
 # Point its Voice webhook                       at  {ngrok}/twilio/voice/inbound
 ```
+
+For **production deployment** (AWS ECS Fargate, the stack actually serving https://concierge.appboardbreeze.com), follow [`Deployment.md`](./Deployment.md) — 12 phases from `Dockerfile` to live HTTPS, with every CLI command pre-filled with the relevant account, cluster, VPC, and subnet IDs.
 
 ---
 

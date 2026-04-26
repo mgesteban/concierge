@@ -35,6 +35,15 @@ governance_tools.zip
 boardbreeze-concierge-playbook-*.md
 # Demo video script — personal, not a shipped artifact.
 video_script*.md
+# YouTube + Devpost descriptions — personal/promotional copy, evolves
+# faster than the repo and shouldn't pollute git history.
+youtube_description*.md
+devpost_description*.md
+# Screen-recording captures and any raw video files — large binaries, local-only.
+Video Demo/
+*.webm
+*.mp4
+*.mov
 # KB source materials — third-party licensed (AALRR PDF covered by *.pdf
 # above) and Grace's not-public-facing product FAQ. See
 # project_kb_source_files memory for why.
